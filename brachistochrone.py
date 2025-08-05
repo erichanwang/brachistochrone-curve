@@ -34,41 +34,53 @@ def linear_func(x):
     return m * (x - x1) + y1
 
 def parabola_func(x):
-    """A parabola passing through START_POS and (END_X, END_Y)"""
+    """A parabola sagging between START_POS and (END_X, END_Y)"""
     x1, y1 = START_POS
     x2, y2 = END_X, END_Y
-    # y = a(x-h)^2 + k, vertex at (h, k)
-    # For simplicity, let's make the curve pass through the points
-    # y = ax^2 + bx + c is too complex, let's use a simpler form
-    # y = k * (x - x1) ^ 2 + y1, find k such that it passes through (x2, y2)
-    if (x2 - x1)**2 == 0:
-        return y1
-    k = (y2 - y1) / ((x2 - x1) ** 2)
-    return k * (x - x1) ** 2 + y1
-
-
-def brachistochrone_func(x):
-    """The brachistochrone curve (a cycloid)"""
-    x1, y1 = START_POS
-    x2, y2 = END_X, END_Y
-    a = (y2 - y1) / np.pi  # Radius of the generating circle
-    theta = np.arccos(1 - (x - x1) / a)
-    return a * (theta - np.sin(theta)) + y1
-
-def get_cycloid_points(x_start, y_start, x_end, y_end, num_points=500):
-    """Generates points for a cycloid curve."""
-    # Find the optimal radius 'a' for the cycloid connecting the points
-    # This is a transcendental equation, so we solve it numerically.
-    from scipy.optimize import fsolve
-
-    def find_a(a):
-        theta_end = fsolve(lambda theta: a * (theta - np.sin(theta)) - (x_end - x_start), np.pi)[0]
-        return a * (1 - np.cos(theta_end)) - (y_end - y_start)
-
-    a_initial_guess = (y_end - y_start) / 2
-    a = fsolve(find_a, a_initial_guess)[0]
     
-    theta_end = fsolve(lambda theta: a * (theta - np.sin(theta)) - (x_end - x_start), np.pi)[0]
+    # Linear component
+    m = (y2 - y1) / (x2 - x1)
+    linear_y = m * (x - x1) + y1
+    
+    # Parabolic component for the sag. The coefficient controls the amount of sag.
+    # A negative product is needed to sag "down" in pygame's inverted-y coordinates.
+    sag_coeff = 0.0007
+    parabolic_sag = sag_coeff * (x - x1) * (x - x2)
+    
+    return linear_y - parabolic_sag
+
+def generate_cycloid_points_no_scipy(x_start, y_start, x_end, y_end, num_points=500):
+    """
+    Generates points for a cycloid curve using a numerical search to find the
+    optimal parameters, removing the need for scipy.
+    """
+    # Use a numerical search (bisection method) to find the correct theta_end
+    def find_theta_end(k, low=1e-6, high=2*math.pi, tol=1e-6, max_iter=100):
+        for _ in range(max_iter):
+            mid = (low + high) / 2
+            if mid == 0 or abs(1 - math.cos(mid)) < 1e-9: # Avoid division by zero
+                low = mid
+                continue
+            
+            g_mid = (mid - math.sin(mid)) / (1 - math.cos(mid))
+            
+            if abs(g_mid - k) < tol:
+                return mid
+            
+            if g_mid < k:
+                low = mid
+            else:
+                high = mid
+        return (low + high) / 2
+
+    # Ratio k determines the shape of the cycloid
+    if abs(y_end - y_start) < 1e-9: return [] # Avoid division by zero
+    k = (x_end - x_start) / (y_end - y_start)
+    
+    theta_end = find_theta_end(k)
+    
+    if abs(1 - math.cos(theta_end)) < 1e-9: return [] # Avoid division by zero
+    a = (y_end - y_start) / (1 - math.cos(theta_end))
     
     thetas = np.linspace(0, theta_end, num_points)
     points = []
@@ -84,6 +96,16 @@ class Ball:
         self.color = color
         self.path_points = path_points
         self.radius = 10
+        
+        # Pre-calculate cumulative distances for accurate physics
+        self.cumulative_distances = [0.0]
+        if len(path_points) > 1:
+            for i in range(1, len(path_points)):
+                p1 = path_points[i-1]
+                p2 = path_points[i]
+                dist = math.sqrt((p2[0] - p1[0])**2 + (p2[1] - p1[1])**2)
+                self.cumulative_distances.append(self.cumulative_distances[-1] + dist)
+        
         self.reset()
 
     def reset(self):
@@ -91,55 +113,54 @@ class Ball:
         self.x, self.y = self.path_points[0]
         self.v = 0
         self.finished = False
+        self.distance_traveled = 0.0
+        self.start_time = None
 
-    def update(self):
+    def update(self, dt):
         if self.finished:
             return
 
-        # Nudge the ball to start moving if it's at the beginning
-        if self.pos_index == 0:
-            self.pos_index += 1
+        # If the ball is at the start, give it a nudge to begin moving.
+        if self.pos_index == 0 and len(self.path_points) > 1:
+            self.pos_index = 1
+            self.x, self.y = self.path_points[self.pos_index]
 
-        # Get current and next point on the path
-        if self.pos_index + 1 >= len(self.path_points):
-            self.finished = True
-            return
+        if self.start_time is None:
+            self.start_time = pygame.time.get_ticks()
 
-        p1 = self.path_points[self.pos_index]
-        p2 = self.path_points[self.pos_index + 1]
-
-        # Calculate distance and height difference between points
-        dx = p2[0] - p1[0]
-        dy = p2[1] - p1[1]
-        ds = math.sqrt(dx**2 + dy**2)
-
-        if ds == 0: # Should not happen with good path data
-            self.pos_index += 1
-            return
-
-        # Use energy conservation: 0.5*m*v^2 = m*g*h => v = sqrt(2*g*h)
-        # h is the total vertical distance from the start
+        # Use energy conservation: v = sqrt(2*g*h)
         start_y = self.path_points[0][1]
         current_h = self.y - start_y
-        self.v = math.sqrt(2 * G * current_h * 50) # Scaling factor for visualization
-
-        # Move the ball along the path based on its velocity
-        # This is a simplification. A more accurate way involves time steps.
-        # Let's try a time-based approach.
-        # v_f^2 = v_i^2 + 2*a*d. Here a = g*sin(alpha)
         
-        # Simplified time-based movement
-        if self.v > 0:
-            # Calculate how many path segments we can travel in one frame
-            # This is a simplification to make it look right without a full physics engine
-            steps_to_move = int(self.v / 150) # Heuristic value
-            self.pos_index += max(1, steps_to_move)
+        # The velocity in pixels per second. A scaling factor is used for visualization speed.
+        # Let's make the physics more realistic. 100 pixels = 1 meter.
+        PIXELS_PER_METER = 100
+        G_IN_PIXELS = G * PIXELS_PER_METER
 
-            if self.pos_index >= len(self.path_points):
-                self.pos_index = len(self.path_points) - 1
-                self.finished = True
-            
-            self.x, self.y = self.path_points[self.pos_index]
+        if current_h > 0:
+            # v = sqrt(2 * g_pixels * h_pixels)
+            self.v = math.sqrt(2 * G_IN_PIXELS * current_h)
+        else:
+            self.v = 0
+
+        # Update distance traveled based on velocity and time step
+        self.distance_traveled += self.v * dt
+
+        # Find the new position on the path based on distance traveled
+        # This is more accurate than moving by a fixed number of indices
+        new_pos_index = self.pos_index
+        while (new_pos_index < len(self.cumulative_distances) and
+               self.cumulative_distances[new_pos_index] < self.distance_traveled):
+            new_pos_index += 1
+        
+        self.pos_index = min(new_pos_index, len(self.path_points) - 1)
+        self.x, self.y = self.path_points[self.pos_index]
+
+        # Check if finished
+        if self.pos_index >= len(self.path_points) - 1:
+            self.finished = True
+            finish_time = (pygame.time.get_ticks() - self.start_time) / 1000.0
+            print(f"{self.color} finished in {finish_time:.2f} seconds")
 
 
     def draw(self, win):
@@ -147,8 +168,7 @@ class Ball:
         if self.finished:
              font = pygame.font.SysFont(None, 24)
              text = font.render("Finished!", True, self.color)
-             win.blit(text, (self.x + 15, self.y - 15))
-
+             win.blit(text, (self.x + 20, self.y - 10))
 
 # --- Main Function ---
 def main():
@@ -160,26 +180,25 @@ def main():
     num_points = 500
     x_coords = np.linspace(START_POS[0], END_X, num_points)
     
-    # 1. Straight Line Path
     linear_path = list(zip(x_coords, [linear_func(x) for x in x_coords]))
-    
-    # 2. Parabola Path
     parabola_path = list(zip(x_coords, [parabola_func(x) for x in x_coords]))
+    
+    cycloid_path = generate_cycloid_points_no_scipy(START_POS[0], START_POS[1], END_X, END_Y, num_points)
 
-    # 3. Cycloid (Brachistochrone) Path
-    try:
-        cycloid_path = get_cycloid_points(START_POS[0], START_POS[1], END_X, END_Y, num_points)
-    except ImportError:
-        print("Scipy not found. Cycloid curve will not be generated.")
-        print("Please install it using: pip install scipy")
-        cycloid_path = [] # Fallback
+    # --- Diagnostics ---
+    print(f"Generated {len(linear_path)} points for linear path.")
+    print(f"Generated {len(parabola_path)} points for parabola path.")
+    print(f"Generated {len(cycloid_path)} points for cycloid path.")
 
-    # Create balls for each path
-    ball_linear = Ball(RED, linear_path)
-    ball_parabola = Ball(GREEN, parabola_path)
+    # Create balls for each path, only if the path is not empty
+    ball_linear = Ball(RED, linear_path) if linear_path else None
+    ball_parabola = Ball(GREEN, parabola_path) if parabola_path else None
     ball_cycloid = Ball(BLUE, cycloid_path) if cycloid_path else None
 
     balls = [ball for ball in [ball_linear, ball_parabola, ball_cycloid] if ball]
+    if not balls:
+        print("Error: No valid paths were generated. Cannot run simulation.")
+        return
     
     started = False
 
@@ -203,11 +222,13 @@ def main():
         win_text = font.render("Press SPACE to start/reset", True, BLACK)
         WIN.blit(win_text, (10, 10))
         
-        label_linear = font.render("Linear", True, RED)
-        WIN.blit(label_linear, (linear_path[50][0], linear_path[50][1] - 30))
+        if linear_path:
+            label_linear = font.render("Linear", True, RED)
+            WIN.blit(label_linear, (linear_path[50][0], linear_path[50][1] - 30))
         
-        label_parabola = font.render("Parabola", True, GREEN)
-        WIN.blit(label_parabola, (parabola_path[50][0], parabola_path[50][1] - 30))
+        if parabola_path:
+            label_parabola = font.render("Parabola", True, GREEN)
+            WIN.blit(label_parabola, (parabola_path[50][0], parabola_path[50][1] - 30))
         
         if cycloid_path:
             label_cycloid = font.render("Brachistochrone (Cycloid)", True, BLUE)
@@ -222,15 +243,14 @@ def main():
                 run = False
             if event.type == pygame.KEYDOWN:
                 if event.key == pygame.K_SPACE:
-                    # Reset all balls and start the simulation
                     for ball in balls:
                         ball.reset()
                     started = True
 
-
         if started:
+            dt = clock.get_time() / 1000.0  # Time since last frame in seconds
             for ball in balls:
-                ball.update()
+                ball.update(dt)
 
         draw_window()
 
