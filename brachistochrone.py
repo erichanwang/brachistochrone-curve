@@ -96,6 +96,10 @@ class Ball:
         if self.finished:
             return
 
+        # Nudge the ball to start moving if it's at the beginning
+        if self.pos_index == 0:
+            self.pos_index += 1
+
         # Get current and next point on the path
         if self.pos_index + 1 >= len(self.path_points):
             self.finished = True
@@ -218,13 +222,7 @@ def main():
                 run = False
             if event.type == pygame.KEYDOWN:
                 if event.key == pygame.K_SPACE:
-                    started = not started
-                    if not started: # Reset
-                         for ball in balls:
-                            ball.reset()
-                    # On first press of space, just start the simulation
-                    # On subsequent presses, it will toggle pause/resume
-                    # Let's change it to reset and go
+                    # Reset all balls and start the simulation
                     for ball in balls:
                         ball.reset()
                     started = True
